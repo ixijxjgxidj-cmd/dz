@@ -406,7 +406,7 @@ def main():
 
     # ---- 微调后评分 + 对比 ----
     if os.path.exists(ckpt_best):
-        state = torch.load(ckpt_best, map_location=device)
+        state = torch.load(ckpt_best, map_location=device, weights_only=False)
         model.load_state_dict(state["model"])
         print("\n==== 微调【后】评分（使用 best checkpoint，best=%.4f）====" % float(state.get("best_score", best_score)))
     else:

@@ -19,3 +19,7 @@ data/seisbench_cache/
 # 本地临时
 *.log
 .DS_Store
+
+*.hdf5
+*.csv
+/content/ethz_100hz_subset.hdf5
