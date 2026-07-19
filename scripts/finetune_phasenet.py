@@ -248,6 +248,13 @@ def main():
 
     # ---- 训练循环 ----
     print("\n==== 开始微调: epochs=%d batch=%d lr=%g ====" % (args.epochs, args.batch, args.lr))
+    # 类别权重: P/S 稀疏(~1%点), 噪声占~99%. 不加权则模型会"全预测噪声"偷懒躺平
+    # (loss 假降、P/S 通道压成0 -> 崩). 给 P/S 通道远大于噪声的权重, 逼模型认真拾峰.
+    w = []
+    for lab in label_order:
+        u = str(lab).upper()
+        w.append(1.0 if u.startswith("N") else 30.0)  # 噪声权重1, P/S权重30
+    class_w = torch.tensor(w, dtype=torch.float32, device=device).view(1, -1, 1)  # (1,C,1)
     nB = int(math.ceil(len(raw) / args.batch))
     for ep in range(start_epoch, args.epochs):
         model.train()
@@ -257,8 +264,9 @@ def main():
             idx = perm[b*args.batch:(b+1)*args.batch]
             xb = X[idx].to(device); yb = Y[idx].to(device)
             out = model(xb)
-            pred = torch.softmax(out, dim=1) if out.min() < 0 or out.max() > 1 else out
-            loss = -(yb * torch.log(pred.clamp_min(1e-7))).sum(dim=1).mean()
+            pred = torch.softmax(out, dim=1) if (out.min() < 0 or out.max() > 1) else out
+            # 加权逐点交叉熵: 沿通道维加权求和, 再对(点,样本)取均值
+            loss = -(class_w * yb * torch.log(pred.clamp_min(1e-7))).sum(dim=1).mean()
             opt.zero_grad(); loss.backward(); opt.step()
             ep_loss += float(loss)
         ep_loss /= nB
@@ -278,9 +286,10 @@ def main():
     print_score("微调前", before)
     print_score("微调后", after)
     d = after["mean_score"] - before["mean_score"]
-    print("平均分变化: %+.4f  %s" % (d, "(提升↑)" if d > 0 else "(未提升,合成数据本就接近满分属正常)"))
-    print("\n权重已存: %s/best.pt  (小文件,记得 push 回 Gitee 保住成果)" % args.out)
-    print("提示: 合成数据上预训练模型本就近满分,提升空间有限;")
+    tag = "(提升↑)" if d > 0 else "(未提升)"
+    print("平均分变化: %+.4f  %s" % (d, tag))
+    print("\n权重已存: %s/best.pt  (小文件, 记得 push 回 Gitee 保住成果)" % args.out)
+    print("提示: 合成数据上预训练模型本就近满分, 关键看'微调后不崩';")
     print("      真正的提升要在 DiTing/官方【真实数据】上才看得出来。")
 
 if __name__ == "__main__":
