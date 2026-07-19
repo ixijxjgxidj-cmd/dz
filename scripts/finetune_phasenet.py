@@ -93,15 +93,90 @@ def gaussian(n, center, sigma):
     return np.exp(-0.5*((t-center)/sigma)**2).astype("float32")
 
 def make_soft_label(n, p_sample, s_sample, label_order, sigma_p=20, sigma_s=30):
-    """按模型 label 顺序生成软标签 (C, n)。P/S 打高斯峰,噪声通道=1-max(P,S)。"""
+    """按模型 label 顺序生成软标签 (C, n)。
+
+    PhaseNet 的 forward 在当前 SeisBench 版本里已经输出 softmax 概率，因此训练目标
+    也必须是每个采样点三通道和为 1 的概率分布。旧写法在 P/S 有重叠尾巴时可能让
+    P+S+N > 1；这里统一做一次逐点归一化，保证 loss 口径稳定。
+    """
     P = gaussian(n, p_sample, sigma_p) if p_sample >= 0 else np.zeros(n, "float32")
     S = gaussian(n, s_sample, sigma_s) if s_sample >= 0 else np.zeros(n, "float32")
-    N = np.clip(1.0 - np.maximum(P, S), 0, 1).astype("float32")
+    N = np.clip(1.0 - P - S, 0, 1).astype("float32")
     chans = []
     for lab in label_order:
         u = str(lab).upper()
         chans.append(P if u.startswith("P") else S if u.startswith("S") else N)
-    return np.vstack(chans).astype("float32")
+    y = np.vstack(chans).astype("float32")
+    y /= np.maximum(y.sum(axis=0, keepdims=True), 1e-6)
+    return y
+
+def phasenet_log_probs(out):
+    """把 PhaseNet forward 输出统一转成 log-probabilities。
+
+    SeisBench PhaseNet(stead) 的 forward 通常已经是 softmax 概率；少数版本或未来模型
+    可能返回 logits。这里用通道和是否接近 1 来判断，避免对概率再 softmax 一次。
+    """
+    import torch
+
+    with torch.no_grad():
+        o = out.detach()
+        channel_sum = o.sum(dim=1)
+        is_prob = (
+            torch.isfinite(o).all()
+            and float(o.min()) >= -1e-5
+            and float(o.max()) <= 1.0 + 1e-5
+            and torch.allclose(
+                channel_sum,
+                torch.ones_like(channel_sum),
+                rtol=1e-3,
+                atol=1e-3,
+            )
+        )
+    if is_prob:
+        return torch.log(out.clamp_min(1e-7))
+    return torch.log_softmax(out, dim=1)
+
+def set_safe_finetune_mode(model, update_bn=False):
+    """小样本微调时冻结 BatchNorm/Dropout 的训练态。
+
+    这次崩溃最像 BN running stats 被 40 条高度相似的合成数据冲坏：训练 loss 看似正常，
+    但 eval/classify 使用被污染的 running stats 后 P/S 峰消失。卷积参数仍然会训练；
+    只是 BN 用预训练统计量、Dropout 关闭，让训练前向和推理前向保持一致。
+    """
+    import torch
+
+    model.train()
+    if update_bn:
+        return
+
+    bn_types = (
+        torch.nn.BatchNorm1d,
+        torch.nn.BatchNorm2d,
+        torch.nn.BatchNorm3d,
+        torch.nn.SyncBatchNorm,
+    )
+    for module in model.modules():
+        if isinstance(module, bn_types):
+            module.eval()
+            for p in module.parameters(recurse=False):
+                p.requires_grad = False
+        if isinstance(module, torch.nn.modules.dropout._DropoutNd):
+            module.eval()
+
+def save_checkpoint(path, model, opt, epoch, loss, best_score, args, extra=None):
+    import torch
+
+    payload = {
+        "model": model.state_dict(),
+        "opt": opt.state_dict() if opt is not None else None,
+        "epoch": epoch,
+        "loss": loss,
+        "best_score": best_score,
+        "args": vars(args),
+    }
+    if extra:
+        payload.update(extra)
+    torch.save(payload, path)
 
 # ============ 数据集构造 ============
 def build_synth_dataset(n_samples, win, sr, seed0=0):
@@ -199,7 +274,12 @@ def main():
     ap.add_argument("--out", default="/data/coding/dizheng/runs/ft1", help="产物目录(checkpoint等)")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch", type=int, default=16, help="8G显存建议8~16,炸显存就调小")
-    ap.add_argument("--lr", type=float, default=1e-4, help="微调用小学习率,别破坏预训练特征")
+    ap.add_argument("--lr", type=float, default=3e-5, help="微调用小学习率,别破坏预训练特征")
+    ap.add_argument("--weight-decay", type=float, default=0.0, help="小样本 sanity check 默认不做权重衰减")
+    ap.add_argument("--phase-weight", type=float, default=5.0, help="P/S loss 权重；原 30 对小样本过猛")
+    ap.add_argument("--grad-clip", type=float, default=1.0, help="梯度裁剪阈值；<=0 表示关闭")
+    ap.add_argument("--update-bn", action="store_true", help="允许更新 BatchNorm running stats（默认冻结，防小样本冲坏）")
+    ap.add_argument("--score-every", type=int, default=1, help="每多少 epoch 跑一次合成评分并更新 best；<=0 关闭")
     ap.add_argument("--n_synth", type=int, default=400, help="合成模式:造多少训练窗口")
     ap.add_argument("--win", type=int, default=3001, help="训练窗口长度(PhaseNet默认3001)")
     ap.add_argument("--sr", type=float, default=100.0)
@@ -235,53 +315,105 @@ def main():
     X = torch.tensor(X, dtype=torch.float32)
     Y = torch.tensor(Y, dtype=torch.float32)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # 小样本微调的第一原则：别让 BN/Dropout 的训练态和 classify/eval 推理态错位。
+    # requires_grad 会在这里前设置好，因此 optimizer 不会更新被冻结的 BN affine 参数。
+    set_safe_finetune_mode(model, update_bn=args.update_bn)
+    opt = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
 
     # ---- 断点续训 ----
     ckpt_last = os.path.join(args.out, "last.pt")
+    ckpt_best = os.path.join(args.out, "best.pt")
     start_epoch = 0
+    best_score = float("-inf")
     if args.resume and os.path.exists(ckpt_last):
         state = torch.load(ckpt_last, map_location=device)
-        model.load_state_dict(state["model"]); opt.load_state_dict(state["opt"])
+        model.load_state_dict(state["model"])
+        if state.get("opt") is not None:
+            try:
+                opt.load_state_dict(state["opt"])
+            except ValueError as exc:
+                print("[断点续训] optimizer 状态与当前冻结策略不兼容，已只加载模型权重：%r" % exc)
         start_epoch = state["epoch"]
-        print("[断点续训] 从 epoch %d 继续" % start_epoch)
+        best_score = float(state.get("best_score", best_score))
+        print("[断点续训] 从 epoch %d 继续，历史 best=%.4f" % (start_epoch, best_score))
+
+    # baseline 同时作为 best 守门员：微调一旦把模型训坏，最终会自动回滚到 best。
+    if before["mean_score"] >= best_score:
+        best_score = before["mean_score"]
+        save_checkpoint(
+            ckpt_best, model, opt, start_epoch, loss=None, best_score=best_score,
+            args=args, extra={"score": before, "tag": "baseline_or_resume"},
+        )
 
     # ---- 训练循环 ----
     print("\n==== 开始微调: epochs=%d batch=%d lr=%g ====" % (args.epochs, args.batch, args.lr))
-    # 类别权重: P/S 稀疏(~1%点), 噪声占~99%. 不加权则模型会"全预测噪声"偷懒躺平
-    # (loss 假降、P/S 通道压成0 -> 崩). 给 P/S 通道远大于噪声的权重, 逼模型认真拾峰.
+    print("     BN/Dropout: %s | phase_weight=%.2f | weight_decay=%g | grad_clip=%g" % (
+        "允许更新" if args.update_bn else "冻结为推理态",
+        args.phase_weight,
+        args.weight_decay,
+        args.grad_clip,
+    ))
+    # 类别权重: P/S 稀疏，但原先 30 倍在小样本上容易过猛。默认 5 倍更保守，
+    # 合成 sanity check 的目标是“不破坏预训练峰”，不是强行学出一个新分布。
     w = []
     for lab in label_order:
         u = str(lab).upper()
-        w.append(1.0 if u.startswith("N") else 30.0)  # 噪声权重1, P/S权重30
+        w.append(1.0 if u.startswith("N") else args.phase_weight)
     class_w = torch.tensor(w, dtype=torch.float32, device=device).view(1, -1, 1)  # (1,C,1)
     nB = int(math.ceil(len(raw) / args.batch))
     for ep in range(start_epoch, args.epochs):
-        model.train()
+        set_safe_finetune_mode(model, update_bn=args.update_bn)
         perm = torch.randperm(len(raw))
         ep_loss = 0.0
         for b in range(nB):
             idx = perm[b*args.batch:(b+1)*args.batch]
             xb = X[idx].to(device); yb = Y[idx].to(device)
             out = model(xb)
-            pred = torch.softmax(out, dim=1) if (out.min() < 0 or out.max() > 1) else out
-            # 加权逐点交叉熵: 沿通道维加权求和, 再对(点,样本)取均值
-            loss = -(class_w * yb * torch.log(pred.clamp_min(1e-7))).sum(dim=1).mean()
-            opt.zero_grad(); loss.backward(); opt.step()
+            logp = phasenet_log_probs(out)
+            loss = -(class_w * yb * logp).sum(dim=1).mean()
+            opt.zero_grad()
+            loss.backward()
+            if args.grad_clip and args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            opt.step()
             ep_loss += float(loss)
         ep_loss /= nB
-        torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
-                    "epoch": ep+1, "loss": ep_loss}, ckpt_last)
+
+        score = None
+        if args.score_every > 0 and ((ep + 1) % args.score_every == 0 or ep + 1 == args.epochs):
+            score = eval_score(model, args.sr, device)
+            msg = " | score=%.4f/2.0" % score["mean_score"]
+            if score["mean_score"] >= best_score:
+                best_score = score["mean_score"]
+                save_checkpoint(
+                    ckpt_best, model, opt, ep + 1, ep_loss, best_score, args,
+                    extra={"score": score, "tag": "best"},
+                )
+                msg += " (刷新 best)"
+        else:
+            msg = ""
+
+        save_checkpoint(ckpt_last, model, opt, ep + 1, ep_loss, best_score, args, extra={"score": score})
         with open(os.path.join(args.out, "progress.json"), "w") as f:
-            json.dump({"epoch": ep+1, "loss": ep_loss}, f)
-        print("  epoch %2d/%d  loss=%.5f  (已存 last.pt)" % (ep+1, args.epochs, ep_loss), flush=True)
+            json.dump({"epoch": ep+1, "loss": ep_loss, "best_score": best_score, "score": score}, f)
+        print("  epoch %2d/%d  loss=%.5f%s  (已存 last.pt/best.pt)" % (
+            ep+1, args.epochs, ep_loss, msg
+        ), flush=True)
 
     # ---- 微调后评分 + 对比 ----
-    print("\n==== 微调【后】评分 ====")
+    if os.path.exists(ckpt_best):
+        state = torch.load(ckpt_best, map_location=device)
+        model.load_state_dict(state["model"])
+        print("\n==== 微调【后】评分（使用 best checkpoint，best=%.4f）====" % float(state.get("best_score", best_score)))
+    else:
+        print("\n==== 微调【后】评分 ====")
     after = eval_score(model, args.sr, device)
     print_score("微调后", after)
 
-    torch.save({"model": model.state_dict(), "epoch": args.epochs}, os.path.join(args.out, "best.pt"))
     print("\n==== 对比 ====")
     print_score("微调前", before)
     print_score("微调后", after)
