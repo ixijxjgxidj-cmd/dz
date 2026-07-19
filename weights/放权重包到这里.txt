@@ -1,0 +1,4 @@
+把从 GPU 机器下载的 phasenet_stead_weights.tar.gz (约1.1MB) 放到这个 weights/ 目录，
+然后一起 git push 到 Gitee。
+
+下次开机 git clone 下来后，setup.sh 会自动从这里恢复权重，免跨境重下。

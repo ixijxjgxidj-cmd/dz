@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# 数据与运行产物（大文件不进仓库）
+runs/
+*.mseed
+*.hdf5
+*.hdf5.partial
+*.csv.partial
+data/seisbench_cache/
+
+# 但权重备份要保留（体积小、开机要用），显式放行
+!weights/*.tar.gz
+
+# 本地临时
+*.log
+.DS_Store
