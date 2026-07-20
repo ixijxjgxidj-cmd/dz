@@ -264,13 +264,70 @@ def eval_score(model, sr, device):
                 p_hit=p_hit, s_hit=s_hit, n=n)
 
 def print_score(tag, sc):
-    print("[%s] 平均分=%.4f/2.0 | P残差=%.3fs(满分率%.0f%%) | S残差=%.3fs(满分率%.0f%%)" % (
-        tag, sc["mean_score"], sc["p_res"], sc["p_hit"]*100, sc["s_res"], sc["s_hit"]*100))
+    n = sc.get("n", 0)
+    print("[%s] 平均分=%.4f/2.0 | P残差=%.3fs(满分率%.0f%%) | S残差=%.3fs(满分率%.0f%%) | 样本=%d" % (
+        tag, sc["mean_score"], sc["p_res"], sc["p_hit"]*100, sc["s_res"], sc["s_hit"]*100, n))
+
+# ============ 真实留出集评分（用 model.classify，与合成评分同一套打分口径）============
+def eval_holdout(model, holdout_path, sr, device, win, max_files=0):
+    """在真实留出集上评分。留出集是标准 HDF5（group 'data'，attrs p/s_sample_100hz）。
+
+    为什么要单独有它：eval_score 用的是合成 case，预训练模型本就近满分，
+    证明不了模型在真实数据上的泛化。真实留出集用【训练没见过】的真波形，
+    才能回答“这次微调到底有没有用”。打分规则与合成完全一致，可直接对比。
+    """
+    import torch
+    from obspy import Stream, Trace, UTCDateTime
+    items = load_hdf5_dataset(holdout_path, win)
+    if max_files and max_files > 0:
+        items = items[:max_files]
+    if not items:
+        return dict(mean_score=float("nan"), p_res=float("nan"), s_res=float("nan"),
+                    p_hit=0.0, s_hit=0.0, n=0)
+    t0 = UTCDateTime(0)
+    reports = []
+    model.eval()
+    for wave, p, s in items:
+        st = Stream()
+        for ch, name in zip(wave, ["Z", "N", "E"]):
+            tr = Trace(data=np.asarray(ch, dtype="float32"))
+            tr.stats.sampling_rate = sr
+            tr.stats.starttime = t0
+            tr.stats.channel = "HH" + name
+            tr.stats.station = "HLD"
+            st.append(tr)
+        out = model.classify(st)
+        picks = getattr(out, "picks", out)
+        pred = []
+        for pk_ in list(picks):
+            pk = getattr(pk_, "peak_time", None)
+            sec = float(pk - t0) if pk is not None else float("nan")
+            ptype = str(getattr(pk_, "phase", "?")).upper()
+            if ptype in ("P", "S") and not math.isnan(sec):
+                pred.append((ptype, sec))
+        truth = []
+        if p >= 0:
+            truth.append(("P", p / sr))
+        if s >= 0:
+            truth.append(("S", s / sr))
+        reports.append(score_file(pred, truth))
+    n = len(reports)
+    tot = sum(r["total"] for r in reports)
+    allp = [x for r in reports for x in r["pres"]]
+    alls = [x for r in reports for x in r["sres"]]
+    p_hit = np.mean([1.0 if x <= 0.1 else 0.0 for x in allp]) if allp else 0.0
+    s_hit = np.mean([1.0 if x <= 0.2 else 0.0 for x in alls]) if alls else 0.0
+    return dict(mean_score=tot/n,
+                p_res=float(np.mean(allp)) if allp else float("nan"),
+                s_res=float(np.mean(alls)) if alls else float("nan"),
+                p_hit=p_hit, s_hit=s_hit, n=n)
 
 # ============ 主流程 ============
 def main():
     ap = argparse.ArgumentParser(description="PhaseNet 微调(可断点续训,前后对比)")
-    ap.add_argument("--data", default="synth", help="'synth' 或 DiTing子集 hdf5 路径")
+    ap.add_argument("--data", default="synth", help="'synth' 或 训练集 hdf5 路径(DiTing/GeoNet子集)")
+    ap.add_argument("--holdout", default="", help="真实留出集 hdf5(训练没见过的真波形);留空则只做合成评分")
+    ap.add_argument("--holdout-max", type=int, default=200, help="留出集最多评多少条(0=全部);classify 慢,默认封顶")
     ap.add_argument("--out", default="/data/coding/dizheng/runs/ft1", help="产物目录(checkpoint等)")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch", type=int, default=16, help="8G显存建议8~16,炸显存就调小")
@@ -301,7 +358,12 @@ def main():
     # ---- 微调前基线分 ----
     print("\n==== 微调【前】基线评分 ====")
     before = eval_score(model, args.sr, device)
-    print_score("微调前", before)
+    print_score("微调前(合成)", before)
+    before_ho = None
+    if args.holdout:
+        print("\n==== 微调【前】真实留出集评分 ====")
+        before_ho = eval_holdout(model, args.holdout, args.sr, device, args.win, args.holdout_max)
+        print_score("微调前(真实)", before_ho)
 
     # ---- 训练数据 ----
     print("\n==== 构造训练数据 (%s) ====" % args.data)
@@ -412,17 +474,28 @@ def main():
     else:
         print("\n==== 微调【后】评分 ====")
     after = eval_score(model, args.sr, device)
-    print_score("微调后", after)
+    print_score("微调后(合成)", after)
+    after_ho = None
+    if args.holdout:
+        print("\n==== 微调【后】真实留出集评分 ====")
+        after_ho = eval_holdout(model, args.holdout, args.sr, device, args.win, args.holdout_max)
+        print_score("微调后(真实)", after_ho)
 
     print("\n==== 对比 ====")
-    print_score("微调前", before)
-    print_score("微调后", after)
+    print("[合成] 关键看'微调后不崩'(预训练本就近满分):")
+    print_score("微调前(合成)", before)
+    print_score("微调后(合成)", after)
     d = after["mean_score"] - before["mean_score"]
-    tag = "(提升↑)" if d > 0 else "(未提升)"
-    print("平均分变化: %+.4f  %s" % (d, tag))
+    print("  合成平均分变化: %+.4f  %s" % (d, "(提升↑)" if d > 0 else "(未提升)"))
+    if before_ho is not None and after_ho is not None:
+        print("[真实] 这才是泛化能力的真实证据:")
+        print_score("微调前(真实)", before_ho)
+        print_score("微调后(真实)", after_ho)
+        dh = after_ho["mean_score"] - before_ho["mean_score"]
+        print("  真实平均分变化: %+.4f  %s" % (dh, "(提升↑)" if dh > 0 else "(未提升/退化)"))
     print("\n权重已存: %s/best.pt  (小文件, 记得 push 回 Gitee 保住成果)" % args.out)
     print("提示: 合成数据上预训练模型本就近满分, 关键看'微调后不崩';")
-    print("      真正的提升要在 DiTing/官方【真实数据】上才看得出来。")
+    print("      真正的提升要在真实【留出集】上才看得出来(用 --holdout 指定)。")
 
 if __name__ == "__main__":
     try:
