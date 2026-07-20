@@ -140,7 +140,8 @@ def _extract_picks(event):
     # 优先用 origin.arrivals 的 phase（更权威），回落到 pick.phase_hint
     if origin is not None and origin.arrivals:
         for arr in origin.arrivals:
-            pid = arr.pick_resource_id.id if arr.pick_resource_id else None
+            pick_id = getattr(arr, "pick_id", None)
+            pid = pick_id.id if pick_id is not None else None
             if pid not in picks_by_id:
                 continue
             sta, hint, t = picks_by_id[pid]
