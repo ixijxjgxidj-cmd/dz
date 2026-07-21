@@ -1,0 +1,135 @@
+{
+  "feature_count": 60,
+  "feature_names": [
+    "Z_log_std",
+    "Z_log_peak",
+    "Z_log_p2p",
+    "Z_log_abs_q50",
+    "Z_log_abs_q90",
+    "Z_log_abs_q99",
+    "Z_crest_factor",
+    "Z_zero_cross_rate",
+    "Z_peak_position",
+    "Z_dominant_freq_hz",
+    "Z_spectral_centroid_hz",
+    "Z_spectral_bandwidth_hz",
+    "Z_bandpower_0p2_1",
+    "Z_bandpower_1_3",
+    "Z_bandpower_3_8",
+    "Z_bandpower_8_15",
+    "Z_bandpower_15_40",
+    "N_log_std",
+    "N_log_peak",
+    "N_log_p2p",
+    "N_log_abs_q50",
+    "N_log_abs_q90",
+    "N_log_abs_q99",
+    "N_crest_factor",
+    "N_zero_cross_rate",
+    "N_peak_position",
+    "N_dominant_freq_hz",
+    "N_spectral_centroid_hz",
+    "N_spectral_bandwidth_hz",
+    "N_bandpower_0p2_1",
+    "N_bandpower_1_3",
+    "N_bandpower_3_8",
+    "N_bandpower_8_15",
+    "N_bandpower_15_40",
+    "E_log_std",
+    "E_log_peak",
+    "E_log_p2p",
+    "E_log_abs_q50",
+    "E_log_abs_q90",
+    "E_log_abs_q99",
+    "E_crest_factor",
+    "E_zero_cross_rate",
+    "E_peak_position",
+    "E_dominant_freq_hz",
+    "E_spectral_centroid_hz",
+    "E_spectral_bandwidth_hz",
+    "E_bandpower_0p2_1",
+    "E_bandpower_1_3",
+    "E_bandpower_3_8",
+    "E_bandpower_8_15",
+    "E_bandpower_15_40",
+    "duration_s",
+    "sampling_rate_hz",
+    "log_vector_rms",
+    "log_vector_peak",
+    "horizontal_vertical_rms_ratio",
+    "vertical_total_rms_ratio",
+    "corr_z_n",
+    "corr_z_e",
+    "corr_n_e"
+  ],
+  "train_zips": [
+    "C:\\Users\\hulk cheng\\Desktop\\第1轮比赛试题与答案_1765249163770..zip"
+  ],
+  "eval_zips": [
+    "C:\\Users\\hulk cheng\\Desktop\\第2轮比赛试题与答案_1765249253663..zip"
+  ],
+  "tasks": {
+    "T2": {
+      "model": "C:\\Users\\hulk cheng\\Desktop\\dizheng\\weights\\official_r1_to_r2\\t2_magnitude_baseline.joblib",
+      "training": {
+        "samples": 200,
+        "target_min": 4.0,
+        "target_max": 6.1,
+        "target_mean": 4.4639999999999995
+      },
+      "samples_per_package": {
+        "C:\\Users\\hulk cheng\\Desktop\\第1轮比赛试题与答案_1765249163770..zip": 200
+      },
+      "training_failures": {
+        "C:\\Users\\hulk cheng\\Desktop\\第1轮比赛试题与答案_1765249163770..zip": []
+      },
+      "evaluation": {
+        "C:\\Users\\hulk cheng\\Desktop\\第2轮比赛试题与答案_1765249253663..zip": {
+          "model_mae": 0.8166636666666669,
+          "model_max_abs_error": 1.7889333333333362,
+          "model_count": 200,
+          "constant_value": 4.3,
+          "constant_mae": 0.8835000000000002,
+          "failed": []
+        }
+      }
+    },
+    "T3": {
+      "model": "C:\\Users\\hulk cheng\\Desktop\\dizheng\\weights\\official_r1_to_r2\\t3_event_baseline.joblib",
+      "training": {
+        "samples": 200,
+        "class_distribution": {
+          "1": 110,
+          "2": 50,
+          "3": 20,
+          "4": 10,
+          "5": 10
+        }
+      },
+      "samples_per_package": {
+        "C:\\Users\\hulk cheng\\Desktop\\第1轮比赛试题与答案_1765249163770..zip": 200
+      },
+      "training_failures": {
+        "C:\\Users\\hulk cheng\\Desktop\\第1轮比赛试题与答案_1765249163770..zip": []
+      },
+      "evaluation": {
+        "C:\\Users\\hulk cheng\\Desktop\\第2轮比赛试题与答案_1765249253663..zip": {
+          "model_accuracy": 0.8148148148148148,
+          "model_correct": 154,
+          "model_count": 189,
+          "constant_class": 1,
+          "constant_accuracy": 0.730593607305936,
+          "confusion": {
+            "1->1": 126,
+            "1->4": 18,
+            "1->3": 14,
+            "2->2": 28,
+            "2->1": 1,
+            "1->2": 2
+          },
+          "failed": []
+        }
+      }
+    }
+  }
+}
