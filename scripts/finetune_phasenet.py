@@ -403,12 +403,16 @@ def main():
         best_score = float(state.get("best_score", best_score))
         print("[断点续训] 从 epoch %d 继续，历史 best=%.4f" % (start_epoch, best_score))
 
-    # baseline 同时作为 best 守门员：微调一旦把模型训坏，最终会自动回滚到 best。
-    if before["mean_score"] >= best_score:
-        best_score = before["mean_score"]
+    # baseline 作为 best 守门员：训练若始终打不过基线，best 就停在预训练权重（诚实的"没提升"）。
+    # 守门指标：有 --holdout 时用【真实留出集】分数；否则退回合成分（纯 sanity check 场景）。
+    # 关键修复：旧版一律用合成分挑 best，但预训练在合成上本就 2.0，微调只会让它降，
+    # 于是 best 永远停在微调前权重——真实数据上学到的东西被丢弃。必须用留出集挑 best。
+    baseline_monitor = before_ho["mean_score"] if before_ho is not None else before["mean_score"]
+    if baseline_monitor >= best_score:
+        best_score = baseline_monitor
         save_checkpoint(
             ckpt_best, model, opt, start_epoch, loss=None, best_score=best_score,
-            args=args, extra={"score": before, "tag": "baseline_or_resume"},
+            args=args, extra={"score": before, "holdout": before_ho, "tag": "baseline_or_resume"},
         )
 
     # ---- 训练循环 ----
@@ -442,26 +446,38 @@ def main():
             if args.grad_clip and args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step()
-            ep_loss += float(loss)
+            ep_loss += float(loss.detach())
         ep_loss /= nB
 
         score = None
+        holdout_score = None
         if args.score_every > 0 and ((ep + 1) % args.score_every == 0 or ep + 1 == args.epochs):
             score = eval_score(model, args.sr, device)
-            msg = " | score=%.4f/2.0" % score["mean_score"]
-            if score["mean_score"] >= best_score:
-                best_score = score["mean_score"]
+            # 挑 best 的守门指标：有 --holdout 用真实留出集，否则退回合成分。
+            # 合成分只作 sanity（看有没有崩），best 的真正依据是留出集泛化。
+            if args.holdout:
+                holdout_score = eval_holdout(
+                    model, args.holdout, args.sr, device, args.win, args.holdout_max)
+                monitor = holdout_score["mean_score"]
+                msg = " | synth=%.4f real=%.4f/2.0" % (score["mean_score"], monitor)
+            else:
+                monitor = score["mean_score"]
+                msg = " | score=%.4f/2.0" % monitor
+            if monitor >= best_score:
+                best_score = monitor
                 save_checkpoint(
                     ckpt_best, model, opt, ep + 1, ep_loss, best_score, args,
-                    extra={"score": score, "tag": "best"},
+                    extra={"score": score, "holdout": holdout_score, "tag": "best"},
                 )
                 msg += " (刷新 best)"
         else:
             msg = ""
 
-        save_checkpoint(ckpt_last, model, opt, ep + 1, ep_loss, best_score, args, extra={"score": score})
+        save_checkpoint(ckpt_last, model, opt, ep + 1, ep_loss, best_score, args,
+                        extra={"score": score, "holdout": holdout_score})
         with open(os.path.join(args.out, "progress.json"), "w") as f:
-            json.dump({"epoch": ep+1, "loss": ep_loss, "best_score": best_score, "score": score}, f)
+            json.dump({"epoch": ep+1, "loss": ep_loss, "best_score": best_score,
+                       "score": score, "holdout": holdout_score}, f)
         print("  epoch %2d/%d  loss=%.5f%s  (已存 last.pt/best.pt)" % (
             ep+1, args.epochs, ep_loss, msg
         ), flush=True)
