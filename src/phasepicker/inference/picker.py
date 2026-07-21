@@ -102,11 +102,29 @@ class SeisBenchPicker(BasePicker):
             )
 
         if cfg.local_weights_path:
-            # 微调权重加载路径：先按结构实例化，再灌入本地 state_dict。
-            # 这样预训练与微调走同一套推理代码，零分叉。
-            model = model_cls(phases="PS", norm="peak")
-            state = torch.load(cfg.local_weights_path, map_location=device)
-            state = state.get("model_state_dict", state)  # 兼容训练脚本的保存格式
+            # 微调权重加载路径：先用同一个预训练配置实例化，确保标签顺序、
+            # 归一化方式和网络结构与训练时完全一致，再灌入本地 state_dict。
+            model = model_cls.from_pretrained(cfg.pretrained)
+            try:
+                checkpoint = torch.load(
+                    cfg.local_weights_path,
+                    map_location=device,
+                    weights_only=False,
+                )
+            except TypeError:  # 兼容较老 PyTorch（没有 weights_only 参数）
+                checkpoint = torch.load(cfg.local_weights_path, map_location=device)
+            if isinstance(checkpoint, dict):
+                # 本仓库两套训练代码分别使用 model / model_state_dict；同时兼容
+                # 常见第三方 checkpoint 的 state_dict 键以及裸 state_dict。
+                state = checkpoint.get("model_state_dict")
+                if state is None:
+                    state = checkpoint.get("model")
+                if state is None:
+                    state = checkpoint.get("state_dict")
+                if state is None:
+                    state = checkpoint
+            else:
+                state = checkpoint
             model.load_state_dict(state)
         else:
             model = model_cls.from_pretrained(cfg.pretrained)

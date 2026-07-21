@@ -92,7 +92,21 @@ def test_output_is_sorted():
 
 
 def _run_all():
-    import base64
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]
-    line
+    lines = []
+    passed = 0
+    for fn in fns:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"FAIL {fn.__name__}: {exc!r}")
+            continue
+        passed += 1
+        lines.append(f"PASS {fn.__name__}")
+    lines.append(f"SUMMARY {passed}/{len(fns)}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    print(_run_all())

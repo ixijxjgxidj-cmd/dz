@@ -150,4 +150,34 @@ def test_score_file_partial_and_penalty():
     truth = [("P", 100.0), ("S", 105.0)]
     pred = [("P", 100.55), ("S", 105.0), ("P", 999.0)]
     rep = score_file(pred, truth)
-    # 时
+    # 时序分：P 0.5 + S 1.0 = 1.5
+    assert abs(rep.p_time_score - 0.5) < 1e-9
+    assert abs(rep.s_time_score - 1.0) < 1e-9
+    # 数量罚：真值2、预测3，超出容许带1个 → 扣0.5
+    assert abs(rep.count_penalty - 0.5) < 1e-9
+    # 总分 = 1.5 - 0.5 = 1.0
+    assert abs(rep.total_score - 1.0) < 1e-9
+    # 999.0 那个 P 是误报
+    assert rep.n_false_pos == 1
+    assert rep.n_false_neg == 0
+
+
+def _run_all():
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+    lines = []
+    passed = 0
+    for fn in fns:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"FAIL {fn.__name__}: {exc!r}")
+            continue
+        passed += 1
+        lines.append(f"PASS {fn.__name__}")
+    lines.append(f"SUMMARY {passed}/{len(fns)}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    print(_run_all())

@@ -18,7 +18,8 @@
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from dataclasses import dataclass
+from typing import List, Optional, Sequence
 
 from ..types import Pick, PhaseType
 
@@ -79,3 +80,48 @@ def deduplicate(
 
     out.sort(key=lambda x: (x.station or "", x.phase.value, x.time_utc))
     return out
+
+
+@dataclass
+class DedupConfig:
+    """去重配置对象（供推理入口 picker.py 注入）。
+
+    把 P/S 各自的合并窗口收进一个配置对象，是为了让 SeisBenchPicker 能在构造时
+    携带一份可配置的去重策略，而不必每次调用都传散参。字段与 DEFAULT_MERGE_WINDOW_S
+    一一对应，缺省即沿用模块默认值，保证行为与旧代码完全一致。
+
+    Attributes:
+        p_merge_window_s: P 波合并窗口（秒）。
+        s_merge_window_s: S 波合并窗口（秒）。
+    """
+
+    p_merge_window_s: float = DEFAULT_MERGE_WINDOW_S[PhaseType.P]
+    s_merge_window_s: float = DEFAULT_MERGE_WINDOW_S[PhaseType.S]
+
+    def to_windows(self) -> dict:
+        """转成 deduplicate() 认识的 {PhaseType: 窗口秒} 映射。"""
+        return {
+            PhaseType.P: self.p_merge_window_s,
+            PhaseType.S: self.s_merge_window_s,
+        }
+
+
+def dedup_picks(
+    picks: Sequence[Pick],
+    cfg: Optional[DedupConfig] = None,
+) -> List[Pick]:
+    """去重合并的配置化包装。
+
+    这是 deduplicate() 的薄封装：cfg 为 None 时行为与 deduplicate(picks) 完全一致；
+    给定 cfg 时用其窗口覆盖默认值。推理入口（inference/picker.py）用它，从而把
+    "去重策略"变成可注入的配置项，同时不改动 deduplicate() 的原有语义。
+
+    Args:
+        picks: 待去重的震相列表。
+        cfg: 去重配置；None 时使用模块默认窗口。
+
+    Returns:
+        去重后的 picks（排序规则同 deduplicate）。
+    """
+    windows = cfg.to_windows() if cfg is not None else None
+    return deduplicate(picks, merge_window_s=windows)
