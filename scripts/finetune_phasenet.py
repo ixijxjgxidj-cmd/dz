@@ -334,6 +334,11 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-5, help="微调用小学习率,别破坏预训练特征")
     ap.add_argument("--weight-decay", type=float, default=0.0, help="小样本 sanity check 默认不做权重衰减")
     ap.add_argument("--phase-weight", type=float, default=5.0, help="P/S loss 权重；原 30 对小样本过猛")
+    ap.add_argument("--p-weight", type=float, default=None,
+                    help="单独指定 P 的 loss 权重；不给则回落到 --phase-weight")
+    ap.add_argument("--s-weight", type=float, default=None,
+                    help="单独指定 S 的 loss 权重；不给则回落到 --phase-weight。"
+                         "想把 S 满分率拉起来就调大它（如 8~10）")
     ap.add_argument("--grad-clip", type=float, default=1.0, help="梯度裁剪阈值；<=0 表示关闭")
     ap.add_argument("--update-bn", action="store_true", help="允许更新 BatchNorm running stats（默认冻结，防小样本冲坏）")
     ap.add_argument("--score-every", type=int, default=1, help="每多少 epoch 跑一次合成评分并更新 best；<=0 关闭")
@@ -423,12 +428,21 @@ def main():
         args.weight_decay,
         args.grad_clip,
     ))
-    # 类别权重: P/S 稀疏，但原先 30 倍在小样本上容易过猛。默认 5 倍更保守，
-    # 合成 sanity check 的目标是“不破坏预训练峰”，不是强行学出一个新分布。
+    # 类别权重: N(噪声)恒为 1.0；P/S 稀疏需加权。
+    # 默认 P/S 都用 --phase-weight；也可用 --p-weight / --s-weight 单独覆盖，
+    # 想把某一相(如 S)的满分率拉起来就单独调大它。原先 30 倍在小样本上过猛，默认 5 倍更稳。
+    p_w = args.p_weight if args.p_weight is not None else args.phase_weight
+    s_w = args.s_weight if args.s_weight is not None else args.phase_weight
     w = []
     for lab in label_order:
         u = str(lab).upper()
-        w.append(1.0 if u.startswith("N") else args.phase_weight)
+        if u.startswith("P"):
+            w.append(p_w)
+        elif u.startswith("S"):
+            w.append(s_w)
+        else:  # N / 噪声
+            w.append(1.0)
+    print("     类别权重: P=%.2f S=%.2f N=1.00 (通道顺序 %s)" % (p_w, s_w, label_order))
     class_w = torch.tensor(w, dtype=torch.float32, device=device).view(1, -1, 1)  # (1,C,1)
     nB = int(math.ceil(len(raw) / args.batch))
     for ep in range(start_epoch, args.epochs):
